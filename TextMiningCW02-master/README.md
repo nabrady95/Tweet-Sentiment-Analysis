@@ -1,5 +1,1 @@
-# To do
-
-1. Create SMA for geolocation
-2. Improve data cleaning procedure
-3. Find ways to compare results
+A pipeline for retrieving tweets from twitter using the twitter API and performing sentiment analyis on those tweets using R.
