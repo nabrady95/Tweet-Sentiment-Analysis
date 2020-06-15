@@ -1,0 +1,342 @@
+---
+title: "Oscars 2020 SMA Pipeline"
+author: "Costis St"
+date: "April 15, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+blablablablablablabla
+
+## Part 1: Load libraries, datasets and retrieve the tweets
+## 1.1 Load libraries and files including the datasets
+
+
+```{r, eval=TRUE, message=FALSE,warning=FALSE}
+# Load the libraries
+library(rtweet)
+library(twitteR)
+library(plyr)
+library(stringr)
+library(ggplot2)
+library(stringi)
+library(wordcloud)
+library(tm)
+library(devtools)
+library(reshape)
+library(qdapRegex)
+library(qdap)
+library(RColorBrewer)
+library(syuzhet)
+library(hunspell)
+library(scales)
+source("D:/Msc_AI_UoM/Semester 2/Text mining/cw02/my_functions.R")
+
+# Load the datasets
+tweets_joker <- read.csv('D:/Msc_AI_UoM/Semester 2/Text mining/cw02/joker_data.csv')
+tweets_phoenix <- read.csv('D:/Msc_AI_UoM/Semester 2/Text mining/cw02/phoenix_data.csv')
+tweets_parasite <- read.csv('D:/Msc_AI_UoM/Semester 2/Text mining/cw02/parasite_data.csv')
+pos <- readLines("D:/Msc_AI_UoM/Semester 2/Text mining/cw02/positive_words.txt")
+neg <- readLines("D:/Msc_AI_UoM/Semester 2/Text mining/cw02/negative_words.txt")
+```
+
+
+
+## 1.2 Extract the tweets from the dataset 
+
+```{r, eval=TRUE}
+# Order the tweets based on the favorite_count and get the most popular
+tweets_joker_ordered<-tweets_joker[order(tweets_joker$likes_count, decreasing = TRUE),]
+tweets_joker_selection<-head(tweets_joker_ordered,10000)
+tweets_phoenix_ordered<-tweets_phoenix[order(tweets_phoenix$likes_count, decreasing = TRUE),]
+tweets_phoenix_selection<-head(tweets_phoenix_ordered,10000)
+tweets_parasite_ordered<-tweets_parasite[order(tweets_parasite$likes_count, decreasing = TRUE),]
+tweets_parasite_selection<-head(tweets_parasite_ordered,10000)
+
+# Extract only the text of the tweets
+tweets_joker.df <- tweets_joker_selection$tweet
+tweets_phoenix.df <- tweets_phoenix_selection$tweet
+tweets_parasite.df <- tweets_parasite_selection$tweet
+```
+
+
+## 1.3 Plot time series comparing number of tweets at each time interval
+```{r, eval=TRUE}
+# Transform "created_at" column
+created_at_joker<- as.POSIXct(paste(tweets_joker$date, tweets_joker$time), format="%Y-%m-%d %H:%M:%S")
+tweets_joker$created_at<-created_at_joker
+created_at_phoenix<- as.POSIXct(paste(tweets_phoenix$date, tweets_phoenix$time), format="%Y-%m-%d %H:%M:%S")
+tweets_phoenix$created_at<-created_at_phoenix
+created_at_parasite<- as.POSIXct(paste(tweets_parasite$date, tweets_parasite$time), format="%Y-%m-%d %H:%M:%S")
+tweets_parasite$created_at<-created_at_parasite
+
+# Create a time series object
+joker_ts<-ts_data(tweets_joker, by='hours')
+names(joker_ts)<- c("time","joker_n")
+phoenix_ts<-ts_data(tweets_phoenix, by='hours')
+names(phoenix_ts)<- c("time","phoenix_n")
+parasite_ts<-ts_data(tweets_parasite, by='hours')
+names(parasite_ts)<- c("time","parasite_n")
+
+# Merge the two time series objects
+merged_df<-merge(phoenix_ts, joker_ts, by ='time', all=TRUE)
+melt_df<-melt(merged_df, na.rm=TRUE, id.vars='time')
+
+# Plot frequency of tweets on Joker and Parasite
+ggplot(data = melt_df,
+       aes(x = time, y = value, col = variable))+
+  geom_line(lwd = 0.8)
+```
+
+
+## Part 2: Preprocessing, data cleaning and creating the corresponding corpus
+## 2.1 Data cleaning and creating the corresponding corpus
+```{r, eval=TRUE}
+# Processing / Cleaning
+tweets_parasite_clean <- cleanse_them_tweets(tweets_parasite.df)
+tweets_joker_clean <- cleanse_them_tweets(tweets_joker.df)
+tweets_phoenix_clean <- cleanse_them_tweets(tweets_phoenix.df)
+
+# Convert to corpus
+tweets_parasite_corpus<-tweets_parasite_clean %>%
+  VectorSource() %>%
+  Corpus()
+tweets_joker_corpus<-tweets_joker_clean %>%
+  VectorSource() %>%
+  Corpus()
+tweets_phoenix_corpus<-tweets_phoenix_clean %>%
+  VectorSource() %>%
+  Corpus()
+```
+
+## 2.2 The whole data cleaning process as functions
+
+```{r, eval=TRUE}
+####################################################################################################
+#function to perform basic tweet cleaning
+clear_tweets_df <- function(tweets.df)
+{
+  tweets.df = gsub('https\\S+\\s*', '', tweets.df) ## Remove URLs
+  tweets.df = gsub('http\\S+\\s*', '', tweets.df) ## Remove URLs
+  tweets.df = gsub('pic\\S+\\s*', '', tweets.df) ## Remove URLs
+  tweets.df = gsub('www.\\S+\\s*', '', tweets.df) ## Remove URLs
+  tweets.df = gsub('\\b+RT', '', tweets.df) ## Remove RT
+  tweets.df = gsub('#\\S+', '', tweets.df) ## Remove Hashtags
+  tweets.df = gsub('@\\S+', '', tweets.df) ## Remove Mentions
+  tweets.df = gsub('[[:cntrl:]]', '', tweets.df) ## Remove Controls and special characters
+  tweets.df = gsub("\\d", '', tweets.df) ## Remove Controls and special characters
+  return(tweets.df)
+}
+
+####################################################################################################
+
+#function to perform basic tweet cleaning
+remove_slang_misspells <- function(tweets_movie_clean)
+{
+  # Collect all slang/misspelled words
+  #get all tweets as one string
+  oneTweet<-toString(tweets_movie_clean)
+  # get list of all words
+  words <- strsplit(oneTweet, " ")[[1]]
+  
+  badWords<-hunspell(words)
+  badWords<-badWords[lapply(badWords,length)>0]
+  badWords<-tolower(badWords)
+  
+  #split into groups as too large to remove all at once
+  group <- 100
+  n <- length(badWords)
+  r <- rep(1:ceiling(n/group),each=group)[1:n]
+  d <- split(badWords,r)
+  
+  # Remove "bad words" and slang
+  for (i in 1:length(d)) {
+    
+    tweets_movie_clean <- removeWords(tweets_movie_clean, c(paste(d[[i]])))
+    
+  }
+  return(tweets_movie_clean)
+}
+
+####################################################################################################
+
+# Cleaning procedure
+cleanse_them_tweets <- function(tweets.df)
+{
+  # Remove the tweet text URLs
+  tweets_movie_clean<- clear_tweets_df(tweets.df)
+
+  # Remove special char,punctuations & number
+  tweets_movie_clean<-gsub("[^A-Za-z]"," ",tweets_movie_clean)
+
+  # LowerCase
+  tweets_movie_clean <- tolower(tweets_movie_clean)
+
+  # Remove punctuations
+  tweets_movie_clean <- removePunctuation(tweets_movie_clean)
+
+  # Remove stopwords
+  tweets_movie_clean <- removeWords(tweets_movie_clean, stopwords("english"))
+  
+  # Removing custom stop words
+  custom_stop <- c("movie","parasite","s","t","m","y","re","get","re",
+                   "also","can","amp","one","like","will","go",
+                   "know","us","just","now","ve","got","haven",
+                   "won","don","ho","get","say","even","didn",
+                   "oscars","oscar","nominees","academyawards",
+                   "theoscars","awards","movie", "night", "film",
+                   "carpet", "red","actor","actress")
+  tweets_movie_clean <- removeWords(tweets_movie_clean, custom_stop)
+  
+  # Remove unecessary spaces
+  tweets_movie_clean <- stripWhitespace(tweets_movie_clean)
+
+  
+  # Remove duplicates
+  tweets_movie_clean <- unique(tweets_movie_clean)
+
+  # Remove slang/misspells
+  tweets_movie_clean <- remove_slang_misspells(tweets_movie_clean)
+  
+  return(tweets_movie_clean)
+
+}
+
+```
+
+## Part 3: Word Cloud(s)
+## 3.1 Create two different types of word clouds for each dataset
+```{r, eval=TRUE}
+# Extract top 50 terms from corpus
+term_counts_parasite <- freq_terms(tweets_parasite_corpus,50)
+term_counts_joker <- freq_terms(tweets_joker_corpus,50)
+term_counts_phoenix <- freq_terms(tweets_phoenix_corpus,50)
+
+# Create a subset dataframe
+parasite_50<- subset(term_counts_parasite, FREQ > 50)
+joker_50<-subset(term_counts_joker, FREQ > 50)
+phoenix_50<-subset(term_counts_phoenix, FREQ > 50)
+
+# Create a bar plot of frequent items
+ggplot(parasite_50, aes(x = reorder(WORD, -FREQ), y = FREQ)) +
+  geom_bar(stat='identity', fill = 'blue') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggplot(joker_50, aes(x = reorder(WORD, -FREQ), y = FREQ)) +
+  geom_bar(stat='identity', fill = 'red') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggplot(phoenix_50, aes(x = reorder(WORD, -FREQ), y = FREQ)) +
+  geom_bar(stat='identity', fill = 'green') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Create a WordCloud
+wordcloud(tweets_parasite_corpus, min.freq = 50, colors = 'blue',
+          scale = c(2.5,0.5), random.order = FALSE)
+
+wordcloud(tweets_joker_corpus, min.freq = 50, colors = 'red',
+          scale = c(2.5,0.5), random.order = FALSE)
+
+wordcloud(tweets_phoenix_corpus, min.freq = 50, colors = 'green',
+          scale = c(2.5,0.5), random.order = FALSE)
+
+# More colorful WordCloud
+wordcloud(tweets_parasite_corpus, max.words = 100,
+          colors = brewer.pal(6,"Dark2"), scale = c(2.5,.5),
+          random.order = FALSE)
+
+wordcloud(tweets_joker_corpus, max.words = 100,
+          colors = brewer.pal(6,"Dark2"), scale = c(2.5,.5),
+          random.order = FALSE)
+
+wordcloud(tweets_phoenix_corpus, max.words = 100,
+          colors = brewer.pal(6,"Dark2"), scale = c(2.5,.5),
+          random.order = FALSE)
+```
+
+
+## Part 4: Sentiment Analysis
+## 4.1 
+```{r, eval=TRUE,message=FALSE,warning=FALSE}
+sa_parasite.value<- get_nrc_sentiment(tweets_parasite_clean)
+sa_joker.value<- get_nrc_sentiment(tweets_joker_clean)
+sa_phoenix.value<- get_nrc_sentiment(tweets_phoenix_clean)
+
+# Calculating the sum of sentiment scores
+score_parasite <- colSums(sa_parasite.value[,])
+score_joker <- colSums(sa_joker.value[,])
+score_phoenix <- colSums(sa_phoenix.value[,])
+
+# Convert into a dataframe
+score_parasite_df <- data.frame(score_parasite)
+score_joker_df <- data.frame(score_joker)
+score_phoenix_df <- data.frame(score_phoenix)
+
+sa_parasite.score <- cbind(sentiment = row.names(score_parasite_df),
+                           score_parasite_df, row.names = NULL)
+
+sa_joker.score <- cbind(sentiment = row.names(score_joker_df),
+                        score_joker_df, row.names = NULL)
+
+sa_phoenix.score <- cbind(sentiment = row.names(score_joker_df),
+                          score_phoenix_df, row.names = NULL)
+
+ggplot(data = sa_parasite.score, aes(x = sentiment, y = score_parasite,
+                                     fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data = sa_joker.score, aes(x = sentiment, y = score_joker,
+                                  fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(data = sa_phoenix.score, aes(x = sentiment, y = score_phoenix,
+                                    fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+## 4.2 Sentiment results aggregated to Positive/Neutral/Negative
+```{r, eval=TRUE,  results = "hide"}
+
+#sentiment score
+scores_parasite <- score.sentiment(tweets_parasite_clean, pos.txt, neg.txt, .progress='text')
+scores_joker <- score.sentiment(tweets_joker_clean, pos.txt, neg.txt, .progress='text')
+scores_phoenix <- score.sentiment(tweets_phoenix_clean, pos.txt, neg.txt, .progress='text')
+
+scores_parasite$score_chr <- ifelse(scores_parasite$score < 0,'Negative', ifelse(scores_parasite$score > 0, 'Positive', 'Neutral'))
+scores_joker$score_chr <- ifelse(scores_joker$score < 0,'Negative', ifelse(scores_joker$score > 0, 'Positive', 'Neutral'))
+scores_phoenix$score_chr <- ifelse(scores_phoenix$score < 0,'Negative', ifelse(scores_phoenix$score > 0, 'Positive', 'Neutral'))
+
+#Convert score_chr to factor for visualizations
+scores_parasite$score_chr <- as.factor(scores_parasite$score_chr)
+names(scores_parasite)[3]<-paste("Sentiment")
+scores_joker$score_chr <- as.factor(scores_joker$score_chr)
+names(scores_joker)[3]<-paste("Sentiment")  
+scores_phoenix$score_chr <- as.factor(scores_phoenix$score_chr)
+names(scores_phoenix)[3]<-paste("Sentiment")  
+
+```
+```{r, eval=TRUE}
+
+#plot to show number of negative, positive and neutral comments
+score_visual <- ggplot(scores_parasite, aes(x=Sentiment, fill=Sentiment))+ geom_bar(aes(y = (..count..)/sum(..count..))) + 
+  scale_y_continuous(labels = percent)+labs(y="Score")+
+  theme(text =element_text(size=15))+theme(axis.text = element_text(size=15))+ theme(legend.position="none")+ coord_cartesian(ylim=c(0,0.6)) + scale_fill_manual(values=c("firebrick1", "grey50", "limeGREEN"))
+score_visual
+
+score_visual <- ggplot(scores_joker, aes(x=Sentiment, fill=Sentiment))+ geom_bar(aes(y = (..count..)/sum(..count..))) + 
+  scale_y_continuous(labels = percent)+labs(y="Score")+
+  theme(text =element_text(size=15))+theme(axis.text = element_text(size=15))+ theme(legend.position="none")+ coord_cartesian(ylim=c(0,0.6)) + scale_fill_manual(values=c("firebrick1", "grey50", "limeGREEN"))
+score_visual
+
+score_visual <- ggplot(scores_phoenix, aes(x=Sentiment, fill=Sentiment))+ geom_bar(aes(y = (..count..)/sum(..count..))) + 
+  scale_y_continuous(labels = percent)+labs(y="Score")+
+  theme(text =element_text(size=15))+theme(axis.text = element_text(size=15))+ theme(legend.position="none")+ coord_cartesian(ylim=c(0,0.6)) + scale_fill_manual(values=c("firebrick1", "grey50", "limeGREEN"))
+score_visual
+```
